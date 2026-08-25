@@ -148,7 +148,7 @@
   #sidebarToggle{
     position:absolute;
     top:12px;
-    left:12px;
+    right:12px;
     z-index:900;
     background:var(--panel);
     border:1px solid var(--line);
@@ -214,6 +214,38 @@
   #statusMsg{font-size:12px;margin-top:10px;min-height:16px;}
   #statusMsg.err{color:var(--accent2);}
   #statusMsg.ok{color:var(--accent);}
+
+  #confirmBar{
+    position:fixed;
+    left:50%;
+    bottom:20px;
+    transform:translateX(-50%);
+    z-index:2500;
+    background:var(--panel);
+    border:1px solid var(--line);
+    border-radius:14px;
+    box-shadow:var(--shadow);
+    padding:14px 16px;
+    width:calc(100% - 32px);
+    max-width:380px;
+    display:none;
+  }
+  #confirmBar.show{display:block;}
+  #confirmBar .cb-title{font-size:12px;font-weight:700;margin-bottom:2px;}
+  #confirmBar .cb-addr{font-size:11.5px;color:var(--muted);margin-bottom:4px;}
+  #confirmBar .cb-hint{font-size:11px;color:var(--accent2);margin-bottom:10px;}
+  #confirmBar .btn-row{display:flex;gap:8px;margin-top:0;}
+  #confirmBar button{
+    flex:1;
+    padding:10px;
+    border-radius:9px;
+    border:none;
+    font-size:13px;
+    font-weight:600;
+    cursor:pointer;
+  }
+  #confirmCancelBtn{background:var(--paper);color:var(--ink);border:1px solid var(--line) !important;}
+  #confirmSaveBtn{background:var(--accent);color:#fff;}
 
   .leaflet-popup-content{font-size:12.5px;}
   .stop-dot{
@@ -286,8 +318,18 @@
 
     <div class="btn-row">
       <button id="cancelBtn">Vazgeç</button>
-      <button id="saveBtn">Konumu Bul & Kaydet</button>
+      <button id="saveBtn">Konumu Bul</button>
     </div>
+  </div>
+</div>
+
+<div id="confirmBar">
+  <div class="cb-title">📍 Bulunan konum</div>
+  <div class="cb-addr" id="cbAddress"></div>
+  <div class="cb-hint">Yanlışsa pini haritada sürükleyerek doğru yere taşı</div>
+  <div class="btn-row">
+    <button id="confirmCancelBtn">İptal</button>
+    <button id="confirmSaveBtn">Bu Konumu Kaydet</button>
   </div>
 </div>
 
@@ -635,13 +677,15 @@ saveBtn.addEventListener('click', async () => {
   statusMsg.className = '';
 
   try {
-    const query = encodeURIComponent(searchQuery + ', Ankara, Türkiye');
-    const url = `https://nominatim.openstreetmap.org/search?q=${query}&format=json&limit=1`;
+    const query = encodeURIComponent(searchQuery + (searchQuery.toLowerCase().includes('ankara') ? ', Türkiye' : ', Ankara, Türkiye'));
+    const url = `https://nominatim.openstreetmap.org/search?q=${query}&format=json&limit=1&countrycodes=tr&addressdetails=1`;
     const res = await fetch(url, { headers: { 'Accept-Language': 'tr' } });
     const data = await res.json();
 
     if (!data || data.length === 0){
-      statusMsg.textContent = 'Bu adres bulunamadı, biraz daha detay eklemeyi dene.';
+      statusMsg.textContent = derivedFromLink
+        ? 'Linkten bulunan konum haritada yok, lütfen adres de gir.'
+        : 'Bu adres bulunamadı, biraz daha detay eklemeyi dene.';
       statusMsg.className = 'err';
       saveBtn.disabled = false;
       return;
@@ -649,24 +693,79 @@ saveBtn.addEventListener('click', async () => {
 
     const lat = parseFloat(data[0].lat);
     const lng = parseFloat(data[0].lon);
+    const matchedLabel = data[0].display_name || searchQuery;
 
-    const newHome = {
-      name, address: address || searchQuery, link, lat, lng
-    };
-    const inserted = await insertHome(newHome);
-    homes.push({ id: inserted.id, name: inserted.name, address: inserted.address, link: inserted.link, lat: inserted.lat, lng: inserted.lng });
-    renderHomes();
-
-    statusMsg.textContent = 'Kaydedildi ✓';
-    statusMsg.className = 'ok';
-    setTimeout(() => { overlay.classList.remove('show'); saveBtn.disabled = false; }, 500);
-    map.setView([lat, lng], 15);
+    overlay.classList.remove('show');
+    saveBtn.disabled = false;
+    startPendingPin({ name, address: address || searchQuery, link, lat, lng, matchedLabel, derivedFromLink });
 
   } catch(e) {
     statusMsg.textContent = 'Bir hata oluştu, tekrar dene.';
     statusMsg.className = 'err';
     saveBtn.disabled = false;
   }
+});
+
+// ---------- Pending pin: user confirms/drags before actual save ----------
+const PENDING_ICON = L.divIcon({
+  html: `<div style="background:#fff;border:3px solid #c1542c;width:26px;height:26px;border-radius:50%;box-shadow:0 2px 10px rgba(193,84,44,0.6);display:flex;align-items:center;justify-content:center;font-size:13px;">📍</div>`,
+  className: '', iconSize: [26,26], iconAnchor: [13,13]
+});
+
+let pendingMarker = null;
+let pendingData = null;
+const confirmBar = document.getElementById('confirmBar');
+const cbAddress = document.getElementById('cbAddress');
+
+function startPendingPin(data){
+  pendingData = data;
+  if (pendingMarker) map.removeLayer(pendingMarker);
+
+  pendingMarker = L.marker([data.lat, data.lng], { icon: PENDING_ICON, draggable: true, zIndexOffset: 2000 }).addTo(map);
+  pendingMarker.bindPopup('Doğru yere sürükle, sonra "Kaydet" de').openPopup();
+
+  cbAddress.textContent = data.derivedFromLink
+    ? `Linkten tahmini: ${data.matchedLabel}`
+    : data.matchedLabel;
+  confirmBar.classList.add('show');
+
+  map.setView([data.lat, data.lng], 16);
+}
+
+document.getElementById('confirmCancelBtn').addEventListener('click', () => {
+  if (pendingMarker) { map.removeLayer(pendingMarker); pendingMarker = null; }
+  pendingData = null;
+  confirmBar.classList.remove('show');
+});
+
+document.getElementById('confirmSaveBtn').addEventListener('click', async () => {
+  if (!pendingMarker || !pendingData) return;
+  const finalLatLng = pendingMarker.getLatLng();
+  const btn = document.getElementById('confirmSaveBtn');
+  btn.disabled = true;
+  btn.textContent = 'Kaydediliyor…';
+
+  try {
+    const newHome = {
+      name: pendingData.name,
+      address: pendingData.address,
+      link: pendingData.link,
+      lat: finalLatLng.lat,
+      lng: finalLatLng.lng
+    };
+    const inserted = await insertHome(newHome);
+    homes.push({ id: inserted.id, name: inserted.name, address: inserted.address, link: inserted.link, lat: inserted.lat, lng: inserted.lng });
+    renderHomes();
+  } catch(e) {
+    alert('Kaydetme sırasında hata oluştu, tekrar dene.');
+  }
+
+  map.removeLayer(pendingMarker);
+  pendingMarker = null;
+  pendingData = null;
+  confirmBar.classList.remove('show');
+  btn.disabled = false;
+  btn.textContent = 'Bu Konumu Kaydet';
 });
 
 loadHomes();
